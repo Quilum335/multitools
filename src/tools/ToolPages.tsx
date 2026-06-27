@@ -2209,7 +2209,7 @@ function downloadText(text: string, fileName: string) {
 }
 
 type BrowserOcrWorker = {
-  recognize: (image: File | Blob, options?: Record<string, unknown>) => Promise<{ data?: { text?: string } }>;
+  recognize: (image: File | Blob | HTMLCanvasElement, options?: Record<string, unknown>) => Promise<{ data?: { text?: string } }>;
   setParameters: (params: Record<string, string>) => Promise<unknown>;
 };
 
@@ -2312,7 +2312,143 @@ async function callTranslationApi(text: string, source: string, target: string) 
   return data.text || "";
 }
 
-async function callDocumentTextApi(file: File) {
+function isPdfFile(file: File) {
+  return file.type === "application/pdf" || getExtension(file.name) === "pdf";
+}
+
+function normalizeExtractedText(text: string) {
+  return text
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function hasUsefulTextLayer(text: string) {
+  return (text.match(/[\p{L}\p{N}]/gu) || []).length >= 12;
+}
+
+type PdfTextItem = {
+  str?: string;
+  hasEOL?: boolean;
+};
+
+type PdfPageProxyLike = {
+  getTextContent: () => Promise<{ items?: PdfTextItem[] }>;
+  getViewport: (options: { scale: number }) => { width: number; height: number };
+  render: (options: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => { promise: Promise<void> };
+  cleanup?: () => void;
+};
+
+type PdfDocumentProxyLike = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<PdfPageProxyLike>;
+  destroy?: () => Promise<void>;
+};
+
+function textContentToString(items: PdfTextItem[] = []) {
+  let output = "";
+  for (const item of items) {
+    const value = String(item?.str || "");
+    if (value) {
+      if (output && !/[\s\n]$/.test(output)) output += " ";
+      output += value;
+    }
+    if (item?.hasEOL) output += "\n";
+  }
+  return output;
+}
+
+async function loadPdfJs() {
+  const pdfjs = await import("pdfjs-dist/build/pdf.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.mjs";
+  return pdfjs as typeof pdfjs & {
+    getDocument: (source: { data: Uint8Array }) => { promise: Promise<PdfDocumentProxyLike> };
+  };
+}
+
+async function extractPdfTextLayer(pdf: PdfDocumentProxyLike, onProgress: (progress: number, message: string) => void, isEn: boolean) {
+  const chunks: string[] = [];
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    onProgress(Math.min(35, 10 + Math.round((pageNumber / pdf.numPages) * 25)), isEn ? `Reading page ${pageNumber}/${pdf.numPages}` : `Чтение страницы ${pageNumber}/${pdf.numPages}`);
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const text = textContentToString(content.items);
+    if (text.trim()) chunks.push(text);
+    page.cleanup?.();
+  }
+  return normalizeExtractedText(chunks.join("\n\n"));
+}
+
+async function ocrPdfPages(pdf: PdfDocumentProxyLike, onProgress: (progress: number, message: string) => void, isEn: boolean) {
+  const maxPages = 40;
+  const pageCount = Math.min(pdf.numPages, maxPages);
+  const worker = await loadBrowserOcrWorker(onProgress, isEn);
+  const chunks: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    const pageStart = 38 + ((pageNumber - 1) / pageCount) * 56;
+    const pageEnd = 38 + (pageNumber / pageCount) * 56;
+    const message = isEn ? `OCR page ${pageNumber}/${pageCount}` : `OCR страницы ${pageNumber}/${pageCount}`;
+    onProgress(Math.round(pageStart), message);
+    browserOcrProgressHandler = (info) => {
+      const rawProgress = Number.isFinite(info.progress) ? Number(info.progress) : 0;
+      onProgress(Math.round(pageStart + (pageEnd - pageStart) * Math.min(1, Math.max(0, rawProgress))), message);
+    };
+
+    const page = await pdf.getPage(pageNumber);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const maxPixels = 2_800_000;
+    const scale = Math.max(1.2, Math.min(2, Math.sqrt(maxPixels / Math.max(1, baseViewport.width * baseViewport.height))));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.floor(viewport.width));
+    canvas.height = Math.max(1, Math.floor(viewport.height));
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error(isEn ? "Canvas is not available." : "Canvas недоступен.");
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const result = await worker.recognize(canvas);
+    const text = result.data?.text?.trim();
+    if (text) chunks.push(`--- ${isEn ? "Page" : "Страница"} ${pageNumber} ---\n${text}`);
+    page.cleanup?.();
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+
+  if (pdf.numPages > maxPages) {
+    chunks.push(isEn ? `[OCR processed only the first ${maxPages} pages out of ${pdf.numPages}.]` : `[OCR обработал только первые ${maxPages} страниц из ${pdf.numPages}.]`);
+  }
+
+  return normalizeExtractedText(chunks.join("\n\n"));
+}
+
+async function extractPdfDocumentText(file: File, onProgress: (progress: number, message: string) => void, isEn: boolean) {
+  onProgress(6, isEn ? "Opening PDF" : "Открытие PDF");
+  const pdfjs = await loadPdfJs();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjs.getDocument({ data: bytes }).promise;
+  try {
+    const textLayer = await extractPdfTextLayer(pdf, onProgress, isEn);
+    if (hasUsefulTextLayer(textLayer)) {
+      onProgress(100, isEn ? "Done" : "Готово");
+      return textLayer;
+    }
+
+    onProgress(36, isEn ? "No text layer, starting OCR" : "Текстового слоя нет, запускаю OCR");
+    const ocrText = await ocrPdfPages(pdf, onProgress, isEn);
+    if (!ocrText) throw new Error(isEn ? "No text was found in this PDF." : "В PDF не найден текст.");
+    onProgress(100, isEn ? "Done" : "Готово");
+    return ocrText;
+  } finally {
+    await pdf.destroy?.();
+  }
+}
+
+async function callDocumentTextApi(file: File, onProgress?: (progress: number, message: string) => void, isEn = false) {
+  if (isPdfFile(file) && onProgress) {
+    return extractPdfDocumentText(file, onProgress, isEn);
+  }
+
   const form = new FormData();
   form.append("file", file);
   const response = await fetch("/api/document-text", { method: "POST", body: form });
@@ -3323,7 +3459,10 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
       } else if (kind === "document-converter") {
         setProgress(20);
         setMessage(t(lang, "Чтение документа", "Reading document"));
-        setText(await callDocumentTextApi(file));
+        setText(await callDocumentTextApi(file, (nextProgress, nextMessage) => {
+          setProgress(nextProgress);
+          setMessage(nextMessage);
+        }, lang === "en"));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось получить текст.");

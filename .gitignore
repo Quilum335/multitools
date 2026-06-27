@@ -4,6 +4,7 @@ public/ffmpeg-core/
 public/tesseract/
 public/tesseract-core/
 public/tessdata/
+public/pdfjs/
 .env
 .env.*
 !.env.example

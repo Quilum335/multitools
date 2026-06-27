@@ -8,12 +8,17 @@ const tesseractWorkerTarget = join(process.cwd(), "public", "tesseract", "worker
 const tesseractCoreSource = join(process.cwd(), "node_modules", "tesseract.js-core");
 const tesseractCoreTarget = join(process.cwd(), "public", "tesseract-core");
 const tessdataTarget = join(process.cwd(), "public", "tessdata");
+const pdfWorkerSource = join(process.cwd(), "node_modules", "pdfjs-dist", "build", "pdf.worker.mjs");
+const pdfWorkerTarget = join(process.cwd(), "public", "pdfjs", "pdf.worker.mjs");
 
 if (!existsSync(source)) {
   throw new Error("@ffmpeg/core files were not found. Run npm install before building.");
 }
 if (!existsSync(tesseractWorkerSource) || !existsSync(tesseractCoreSource)) {
   throw new Error("Tesseract.js files were not found. Run npm install before building.");
+}
+if (!existsSync(pdfWorkerSource)) {
+  throw new Error("PDF.js worker was not found. Run npm install before building.");
 }
 
 rmSync(target, { recursive: true, force: true });
@@ -45,5 +50,10 @@ for (const lang of ["eng", "rus"]) {
   copyFileSync(trainedData, join(tessdataTarget, `${lang}.traineddata.gz`));
 }
 
+rmSync(join(process.cwd(), "public", "pdfjs"), { recursive: true, force: true });
+mkdirSync(join(process.cwd(), "public", "pdfjs"), { recursive: true });
+copyFileSync(pdfWorkerSource, pdfWorkerTarget);
+
 console.log("Copied ffmpeg.wasm core to public/ffmpeg-core");
 console.log("Copied Tesseract assets to public/tesseract, public/tesseract-core, and public/tessdata");
+console.log("Copied PDF.js worker to public/pdfjs");
