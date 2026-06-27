@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import multer from "multer";
-import { GoogleGenAI } from "@google/genai";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -9,10 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import tesseract from "tesseract.js";
-import mammoth from "mammoth";
-import ffmpegPath from "ffmpeg-static";
-import { PDFParse } from "pdf-parse";
 
 const app = express();
 const upload = multer({
@@ -31,9 +26,9 @@ const ocrLangPath = join(process.cwd(), "node_modules", ".cache", "multitool-tes
 const ocrCachePath = join(process.cwd(), "node_modules", ".cache", "multitool-tesseract-cache");
 const shortLinks = new Map();
 const maxShortLinks = 1000;
-const { createWorker } = tesseract;
 let ocrWorkerPromise = null;
 let ocrQueue = Promise.resolve();
+let ffmpegPathPromise = null;
 
 app.set("trust proxy", true);
 
@@ -55,7 +50,7 @@ app.use((_req, res, next) => {
 
 app.use(express.json({ limit: "3mb" }));
 
-function requireGemini(res) {
+async function requireGemini(res) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     res.status(500).json({
@@ -63,7 +58,15 @@ function requireGemini(res) {
     });
     return null;
   }
+  const { GoogleGenAI } = await import("@google/genai");
   return new GoogleGenAI({ apiKey });
+}
+
+function getFfmpegPath() {
+  if (!ffmpegPathPromise) {
+    ffmpegPathPromise = import("ffmpeg-static").then((module) => module.default || module);
+  }
+  return ffmpegPathPromise;
 }
 
 function extractText(response) {
@@ -126,6 +129,8 @@ function ensureOcrLangData() {
 async function getOcrWorker() {
   if (!ocrWorkerPromise) {
     ensureOcrLangData();
+    const tesseract = await import("tesseract.js");
+    const createWorker = tesseract.default?.createWorker || tesseract.createWorker;
     ocrWorkerPromise = createWorker("eng+rus", 1, {
       langPath: ocrLangPath,
       cachePath: ocrCachePath,
@@ -155,7 +160,7 @@ async function preprocessOcrImage(buffer, mode) {
 
   try {
     await writeFile(input, buffer);
-    await runProcess(ffmpegPath, ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vf", vf, "-frames:v", "1", output], 20000);
+    await runProcess(await getFfmpegPath(), ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vf", vf, "-frames:v", "1", output], 20000);
     return await readFile(output);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -232,11 +237,13 @@ async function extractDocumentText(file) {
   }
 
   if (name.endsWith(".docx") || mime.includes("wordprocessingml")) {
+    const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer: file.buffer });
     return result.value.trim();
   }
 
   if (name.endsWith(".pdf") || mime.includes("pdf")) {
+    const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: file.buffer });
     try {
       const result = await parser.getText();
@@ -259,7 +266,7 @@ async function extractAudioForTranscription(file) {
   const output = join(dir, "audio.wav");
   try {
     await writeFile(input, file.buffer);
-    await runProcess(ffmpegPath, [
+    await runProcess(await getFfmpegPath(), [
       "-hide_banner",
       "-loglevel",
       "error",
@@ -348,7 +355,7 @@ async function transcribeMedia(file) {
   const output = join(dir, "audio.wav");
   try {
     await writeFile(input, file.buffer);
-    await runProcess(ffmpegPath, [
+    await runProcess(await getFfmpegPath(), [
       "-hide_banner",
       "-loglevel",
       "error",
@@ -389,7 +396,7 @@ async function convertMediaFile(file, args, outputName) {
   const output = join(dir, outputName);
   try {
     await writeFile(input, file.buffer);
-    await runProcess(ffmpegPath, args(input, output), 240000);
+    await runProcess(await getFfmpegPath(), args(input, output), 240000);
     const data = await readFile(output);
     return {
       data,
@@ -771,7 +778,7 @@ app.get("/s/:id", (req, res) => {
 
 app.post("/api/gemini-text", async (req, res) => {
   try {
-    const ai = requireGemini(res);
+    const ai = await requireGemini(res);
     if (!ai) return;
 
     const prompt = String(req.body?.prompt || "").trim();
@@ -795,7 +802,7 @@ app.post("/api/gemini-text", async (req, res) => {
 
 app.post("/api/file-text", upload.single("file"), async (req, res) => {
   try {
-    const ai = requireGemini(res);
+    const ai = await requireGemini(res);
     if (!ai) return;
 
     if (!req.file) {
@@ -830,7 +837,7 @@ app.post("/api/file-text", upload.single("file"), async (req, res) => {
 
 app.post("/api/upscale", upload.single("image"), async (req, res) => {
   try {
-    const ai = requireGemini(res);
+    const ai = await requireGemini(res);
     if (!ai) return;
 
     if (!req.file) {
