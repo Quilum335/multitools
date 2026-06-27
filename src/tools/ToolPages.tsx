@@ -944,6 +944,14 @@ function makeMediaResult(outputName: string, data: Uint8Array, sizeBefore: numbe
   return makeObjectResult(outputName, new Blob([data], { type: mediaMimeFromName(outputName) }), sizeBefore);
 }
 
+function formatFfmpegUiError(reason: unknown, fallback = "Не удалось обработать файл. Попробуйте другой формат или файл меньшего размера.") {
+  const message = formatUnknownError(reason, fallback);
+  if (/memory access out of bounds|out of memory|allocation failed|abort/i.test(message)) {
+    return "Не хватило памяти браузера для этого файла. Попробуйте MP4, уменьшите длительность или возьмите файл поменьше.";
+  }
+  return message;
+}
+
 function buildBasicMediaJob(file: File, mode: FfmpegMode, target: "mp4" | "webm" | "gif"): FfmpegJobConfig {
   if (mode === "audio") {
     return {
@@ -967,7 +975,14 @@ function buildBasicMediaJob(file: File, mode: FfmpegMode, target: "mp4" | "webm"
   if (target === "webm") {
     return {
       outputName: replaceExtension(file.name, "webm"),
-      args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-c:a", "libopus", "-b:a", "128k", output]
+      args: (input, output) => [
+        "-hide_banner", "-loglevel", "error", "-y", "-i", input,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-vf", "scale=trunc(min(1280\\,iw)/2)*2:-2",
+        "-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "1400k",
+        "-c:a", "libvorbis", "-b:a", "128k",
+        output
+      ]
     };
   }
 
@@ -1059,9 +1074,7 @@ function FfmpegTool({ mode }: { mode: FfmpegMode }) {
       });
       setResult(makeMediaResult(job.outputName, data, file.size));
     } catch (reason) {
-      setError(
-        formatUnknownError(reason, "Не удалось обработать файл. Попробуйте другой формат или файл меньшего размера.")
-      );
+      setError(formatFfmpegUiError(reason));
       setResult(null);
     } finally {
       setIsBusy(false);
@@ -2784,7 +2797,7 @@ function AdvancedFfmpegTool({ kind, lang }: { kind: AdvancedFfmpegKind; lang: La
       });
       setResult(makeMediaResult(job.outputName, data, file.size));
     } catch (reason) {
-      setError(formatUnknownError(reason, "Не удалось обработать файл."));
+      setError(formatFfmpegUiError(reason, "Не удалось обработать файл."));
       setResult(null);
     } finally {
       setIsBusy(false);
