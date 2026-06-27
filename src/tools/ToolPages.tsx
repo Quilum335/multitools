@@ -3118,10 +3118,12 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
     try {
       if (kind === "image-ocr") {
         try {
-          setText(await callOcrFile(file));
-        } catch {
-          setMessage(t(lang, "Уточнение результата", "Refining result"));
+          setMessage(t(lang, "Распознавание текста", "Recognizing text"));
           setText(await callGeminiFileTextApi(file, "Extract all readable text from this image. Return plain text only. Preserve line breaks where useful."));
+        } catch (reason) {
+          if (reason instanceof Error && /GEMINI_API_KEY|quota|model|fetch|network/i.test(reason.message)) throw reason;
+          setMessage(t(lang, "Уточнение результата", "Refining result"));
+          setText(await callOcrFile(file));
         }
       } else if (kind === "transcription") {
         try {
