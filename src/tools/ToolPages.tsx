@@ -103,6 +103,34 @@ function compositeCanvasOverColor(source: HTMLCanvasElement, color: string) {
   return canvas;
 }
 
+function cloneCanvas(source: HTMLCanvasElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas недоступен.");
+  ctx.drawImage(source, 0, 0);
+  return canvas;
+}
+
+function prepareCanvasForImageExport(source: HTMLCanvasElement, extension: string, quality: number) {
+  if (extension !== "png" || quality >= 0.98) return source;
+  const canvas = cloneCanvas(source);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas недоступен.");
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = frame.data;
+  const step = Math.max(2, Math.round(2 + (1 - quality) * 46));
+  for (let index = 0; index < data.length; index += 4) {
+    data[index] = Math.min(255, Math.round(data[index] / step) * step);
+    data[index + 1] = Math.min(255, Math.round(data[index + 1] / step) * step);
+    data[index + 2] = Math.min(255, Math.round(data[index + 2] / step) * step);
+    if (data[index + 3] > 0 && data[index + 3] < 255) data[index + 3] = Math.min(255, Math.round(data[index + 3] / step) * step);
+  }
+  ctx.putImageData(frame, 0, 0);
+  return canvas;
+}
+
 function hexToRgbColor(value: string): [number, number, number] {
   const raw = value.replace("#", "").trim();
   const hex = raw.length === 3 ? raw.split("").map((part) => `${part}${part}`).join("") : raw.padEnd(6, "0").slice(0, 6);
@@ -121,6 +149,11 @@ function mediaMimeFromName(name: string) {
   if (extension === "ogg") return "audio/ogg";
   if (extension === "m4a") return "audio/mp4";
   return "video/mp4";
+}
+
+function isVideoFile(file: File) {
+  const extension = getExtension(file.name);
+  return file.type.startsWith("video/") || ["mp4", "mov", "webm", "mkv", "avi", "m4v"].includes(extension);
 }
 
 async function loadPdfDocument() {
@@ -366,7 +399,8 @@ function ImageConverterTool() {
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas недоступен.");
       ctx.drawImage(image, 0, 0);
-      const blob = await canvasToBlob(canvas, imageMime[format], format === "png" ? undefined : quality);
+      const exportCanvas = prepareCanvasForImageExport(canvas, format === "jpeg" ? "jpg" : format, quality);
+      const blob = await canvasToBlob(exportCanvas, imageMime[format], format === "png" ? undefined : quality);
       setResult(makeObjectResult(replaceExtension(file.name, format === "jpeg" ? "jpg" : format), blob, file.size));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось конвертировать файл.");
@@ -407,7 +441,6 @@ function ImageConverterTool() {
               max="1"
               step="0.01"
               value={quality}
-              disabled={format === "png"}
               onChange={(event) => setQuality(Number(event.target.value))}
             />
           </label>
@@ -501,7 +534,8 @@ function ImageCompressorTool() {
       const height = Math.max(1, Math.round(image.naturalHeight * ratio));
       const output = getCanvasOutputForFile(file, format);
       const canvas = drawImageOnCanvas(image, width, height, output.supportsAlpha ? undefined : "#ffffff");
-      const blob = await canvasToBlob(canvas, output.mime, output.extension === "png" ? undefined : quality);
+      const exportCanvas = prepareCanvasForImageExport(canvas, output.extension, quality);
+      const blob = await canvasToBlob(exportCanvas, output.mime, output.extension === "png" ? undefined : quality);
       setResult(makeObjectResult(replaceExtension(file.name, output.extension), blob, file.size));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось сжать изображение.");
@@ -545,7 +579,6 @@ function ImageCompressorTool() {
               max="0.98"
               step="0.01"
               value={quality}
-              disabled={file ? getCanvasOutputForFile(file, format).extension === "png" : format === "png"}
               onChange={(event) => setQuality(Number(event.target.value))}
             />
           </label>
@@ -626,8 +659,14 @@ function ImageResizerTool() {
   }, [cropSquare, height, loadedImage, rotation, width]);
 
   useEffect(() => {
-    if (cropSquare) setHeight(width);
-  }, [cropSquare, width]);
+    if (cropSquare) {
+      setHeight(width);
+      return;
+    }
+    if (keepRatio && sourceSize) {
+      setHeight(Math.max(1, Math.round((width * sourceSize.height) / sourceSize.width)));
+    }
+  }, [cropSquare, keepRatio, sourceSize, width]);
 
   const updateWidth = (value: number) => {
     if (!Number.isFinite(value)) return;
@@ -1004,9 +1043,21 @@ function buildAdvancedMediaJob(
   const volume = Math.min(3, Math.max(0.2, fields.volume));
 
   if (kind === "video-compressor") {
+    const compression = Math.min(90, Math.max(10, quality));
+    const crf = String(Math.round(20 + compression * 0.22));
+    const maxWidth = compression >= 70 ? 720 : compression >= 45 ? 960 : 1280;
+    const audioBitrate = compression >= 70 ? "80k" : compression >= 45 ? "96k" : "128k";
     return {
       outputName: replaceExtension(file.name, "mp4"),
-      args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", String(quality), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]
+      args: (input, output) => [
+        "-hide_banner", "-loglevel", "error", "-y", "-i", input,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-vf", `scale=trunc(min(${maxWidth}\\,iw)/2)*2:-2`,
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", crf, "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", audioBitrate,
+        "-movflags", "+faststart",
+        output
+      ]
     };
   }
 
@@ -1041,6 +1092,22 @@ function buildAdvancedMediaJob(
         if (extension === "m4a") return ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-c:a", "aac", "-b:a", "192k", output];
         return ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-b:a", "192k", output];
       }
+    };
+  }
+
+  if (isVideoFile(file)) {
+    return {
+      outputName: replaceExtension(file.name, "speed.mp4"),
+      args: (input, output) => [
+        "-hide_banner", "-loglevel", "error", "-y", "-i", input,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-filter:v", `setpts=${(1 / tempo).toFixed(4)}*PTS`,
+        "-filter:a", `atempo=${tempo.toFixed(2)},volume=${volume.toFixed(2)}`,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output
+      ]
     };
   }
 
@@ -2147,7 +2214,9 @@ async function callOcrFile(file: File) {
   const response = await fetch("/api/ocr", { method: "POST", body: form });
   const data = (await response.json().catch(() => ({}))) as { text?: string; error?: string };
   if (!response.ok) throw new Error(data.error || response.statusText);
-  return data.text || "";
+  const text = data.text?.trim() || "";
+  if (!text) throw new Error("Текст на изображении не найден.");
+  return text;
 }
 
 async function callTranslationApi(text: string, source: string, target: string) {
@@ -2167,7 +2236,9 @@ async function callDocumentTextApi(file: File) {
   const response = await fetch("/api/document-text", { method: "POST", body: form });
   const data = (await response.json().catch(() => ({}))) as { text?: string; error?: string };
   if (!response.ok) throw new Error(data.error || response.statusText);
-  return data.text || "";
+  const text = data.text?.trim() || "";
+  if (!text) throw new Error("В файле не найден текст.");
+  return text;
 }
 
 async function callTranscriptionApi(file: File) {
@@ -2176,7 +2247,21 @@ async function callTranscriptionApi(file: File) {
   const response = await fetch("/api/transcribe", { method: "POST", body: form });
   const data = (await response.json().catch(() => ({}))) as { text?: string; error?: string };
   if (!response.ok) throw new Error(data.error || response.statusText);
-  return data.text || "";
+  const text = data.text?.trim() || "";
+  if (!text) throw new Error("Речь в файле не распознана.");
+  return text;
+}
+
+async function callGeminiFileTextApi(file: File, prompt: string) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("prompt", prompt);
+  const response = await fetch("/api/file-text", { method: "POST", body: form });
+  const data = (await response.json().catch(() => ({}))) as { text?: string; error?: string };
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  const text = data.text?.trim() || "";
+  if (!text) throw new Error("Сервис не вернул текст.");
+  return text;
 }
 
 function drawImageCover(ctx: CanvasRenderingContext2D, image: HTMLImageElement, x: number, y: number, width: number, height: number) {
@@ -2186,6 +2271,39 @@ function drawImageCover(ctx: CanvasRenderingContext2D, image: HTMLImageElement, 
   const sourceX = (image.naturalWidth - sourceWidth) / 2;
   const sourceY = (image.naturalHeight - sourceHeight) / 2;
   ctx.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
+}
+
+function sampleImagePixel(image: HTMLImageElement, x: number, y: number): Rgb {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas недоступен.");
+  ctx.drawImage(image, Math.max(0, Math.min(image.naturalWidth - 1, Math.round(x))), Math.max(0, Math.min(image.naturalHeight - 1, Math.round(y))), 1, 1, 0, 0, 1, 1);
+  const pixel = ctx.getImageData(0, 0, 1, 1).data;
+  return { r: pixel[0], g: pixel[1], b: pixel[2] };
+}
+
+function createBackgroundRemovedCanvas(image: HTMLImageElement, keyColor: string, tolerance: number, options?: { maxWidth?: number; matteColor?: string }) {
+  const scale = options?.maxWidth ? Math.min(1, options.maxWidth / image.naturalWidth) : 1;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas недоступен.");
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = frame.data;
+  const key = hexToRgbColor(keyColor);
+  const hard = Math.max(1, tolerance);
+  const soft = hard * 1.8;
+  for (let index = 0; index < data.length; index += 4) {
+    const distance = Math.hypot(data[index] - key[0], data[index + 1] - key[1], data[index + 2] - key[2]);
+    if (distance < hard) data[index + 3] = 0;
+    else if (distance < soft) data[index + 3] = Math.round(255 * ((distance - hard) / (soft - hard)));
+  }
+  ctx.putImageData(frame, 0, 0);
+  return options?.matteColor ? compositeCanvasOverColor(canvas, options.matteColor) : canvas;
 }
 
 function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number, maxLines = 4) {
@@ -2215,33 +2333,81 @@ function BackgroundRemoverTool({ lang }: { lang: Lang }) {
   const [tolerance, setTolerance] = useState(42);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
   const [result, setResult] = useObjectResult();
+  const previewRef = useRef<HTMLCanvasElement>(null);
   const file = files[0];
 
-  const process = async () => {
+  useEffect(() => {
+    let cancelled = false;
+    setLoadedImage(null);
+    setResult(null);
+    setError("");
     if (!file) return;
+    loadImage(file)
+      .then((image) => {
+        if (cancelled) return;
+        setLoadedImage(image);
+        setKeyColor(rgbToHex(sampleImagePixel(image, 0, 0)));
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : "Не удалось прочитать изображение.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file]);
+
+  useEffect(() => {
+    if (!loadedImage || sourceMode !== "corner") return;
+    setKeyColor(rgbToHex(sampleImagePixel(loadedImage, 0, 0)));
+  }, [loadedImage, sourceMode]);
+
+  useEffect(() => {
+    const preview = previewRef.current;
+    if (!preview) return;
+    const ctx = preview.getContext("2d");
+    if (!ctx) return;
+    if (!loadedImage) {
+      ctx.clearRect(0, 0, preview.width, preview.height);
+      return;
+    }
+    try {
+      const output = file ? getCanvasOutputForFile(file, "source") : imageOutputMeta.png;
+      const rendered = createBackgroundRemovedCanvas(loadedImage, keyColor, tolerance, {
+        maxWidth: 900,
+        matteColor: output.supportsAlpha ? undefined : matteColor
+      });
+      preview.width = rendered.width;
+      preview.height = rendered.height;
+      ctx.clearRect(0, 0, preview.width, preview.height);
+      ctx.drawImage(rendered, 0, 0);
+    } catch {
+      // Export action reports canvas errors.
+    }
+  }, [file, keyColor, loadedImage, matteColor, tolerance]);
+
+  const pickBackgroundColor = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!loadedImage) return;
+    const canvas = previewRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = ((event.clientX - rect.left) / rect.width) * loadedImage.naturalWidth;
+    const y = ((event.clientY - rect.top) / rect.height) * loadedImage.naturalHeight;
+    setSourceMode("color");
+    setKeyColor(rgbToHex(sampleImagePixel(loadedImage, x, y)));
+  };
+
+  const process = async () => {
+    if (!file || !loadedImage) return;
     setIsBusy(true);
     setError("");
     try {
-      const image = await loadImage(file);
-      const canvas = document.createElement("canvas");
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) throw new Error("Canvas недоступен.");
-      ctx.drawImage(image, 0, 0);
-      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = frame.data;
-      const key = sourceMode === "color" ? hexToRgbColor(keyColor) : [data[0], data[1], data[2]];
-      const soft = tolerance * 1.8;
-      for (let index = 0; index < data.length; index += 4) {
-        const distance = Math.hypot(data[index] - key[0], data[index + 1] - key[1], data[index + 2] - key[2]);
-        if (distance < tolerance) data[index + 3] = 0;
-        else if (distance < soft) data[index + 3] = Math.round(255 * ((distance - tolerance) / (soft - tolerance)));
-      }
-      ctx.putImageData(frame, 0, 0);
       const output = getCanvasOutputForFile(file, "source");
-      const exportCanvas = output.supportsAlpha ? canvas : compositeCanvasOverColor(canvas, matteColor);
+      const exportCanvas = createBackgroundRemovedCanvas(loadedImage, keyColor, tolerance, {
+        matteColor: output.supportsAlpha ? undefined : matteColor
+      });
       const blob = await canvasToBlob(exportCanvas, output.mime, output.extension === "png" ? undefined : 0.9);
       setResult(makeObjectResult(replaceExtension(file.name, output.extension), blob, file.size));
     } catch (reason) {
@@ -2257,7 +2423,7 @@ function BackgroundRemoverTool({ lang }: { lang: Lang }) {
       <ToolPanel>
         <DropZone
           title={t(lang, "Добавьте изображение", "Upload an image")}
-          description={t(lang, "Цвет фона можно взять из угла или выбрать вручную. Лучше всего работает на однотонном фоне.", "The background color can be sampled from the corner or picked manually. Best for solid backgrounds.")}
+          description={t(lang, "Кликните пипеткой по фону и настройте допуск.", "Click the background with the picker and adjust tolerance.")}
           accept="image/*"
           files={files}
           maxSizeMb={40}
@@ -2288,15 +2454,19 @@ function BackgroundRemoverTool({ lang }: { lang: Lang }) {
         </label>
         <button className="btn-primary mt-5" onClick={process} disabled={!file || isBusy}>
           {isBusy ? <Loader2 className="animate-spin" size={16} aria-hidden="true" /> : <Wand2 size={16} aria-hidden="true" />}
-          {t(lang, "Удалить фон", "Remove background")}
+          {t(lang, "Скачать результат", "Download result")}
         </button>
         <div className="mt-4">
           <ErrorMessage message={error} />
         </div>
       </ToolPanel>
       <ToolPanel>
-        <h2 className="mb-4 text-lg font-bold text-[var(--ink)]">{t(lang, "Результат", "Result")}</h2>
-        {result?.url ? <img className="mb-4 max-h-72 w-full rounded-lg border border-[var(--line)] bg-[linear-gradient(45deg,#eee_25%,transparent_25%),linear-gradient(-45deg,#eee_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#eee_75%),linear-gradient(-45deg,transparent_75%,#eee_75%)] bg-[length:20px_20px] bg-[position:0_0,0_10px,10px_-10px,-10px_0] object-contain" src={result.url} alt="" /> : null}
+        <h2 className="mb-4 text-lg font-bold text-[var(--ink)]">{t(lang, "Предпросмотр", "Preview")}</h2>
+        <canvas
+          ref={previewRef}
+          onClick={pickBackgroundColor}
+          className="mb-4 block max-h-[520px] w-full cursor-crosshair rounded-lg border border-[var(--line)] bg-[linear-gradient(45deg,#eee_25%,transparent_25%),linear-gradient(-45deg,#eee_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#eee_75%),linear-gradient(-45deg,transparent_75%,#eee_75%)] bg-[length:20px_20px] bg-[position:0_0,0_10px,10px_-10px,-10px_0] object-contain"
+        />
         <ResultCard result={result} />
       </ToolPanel>
     </div>
@@ -2559,6 +2729,19 @@ function PhotoColorPickerTool({ lang }: { lang: Lang }) {
     setColor({ r: pixel[0], g: pixel[1], b: pixel[2] });
   };
 
+  const downloadColorSquare = async () => {
+    if (!color) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = rgbToHex(color);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const blob = await canvasToBlob(canvas, "image/png");
+    downloadBlob(blob, `color-${rgbToHex(color).replace("#", "")}.png`);
+  };
+
   const values = color ? [rgbToHex(color), `rgb(${color.r}, ${color.g}, ${color.b})`, `hsl(${rgbToHsl(color).h}, ${rgbToHsl(color).s}%, ${rgbToHsl(color).l}%)`] : [];
 
   return (
@@ -2593,6 +2776,10 @@ function PhotoColorPickerTool({ lang }: { lang: Lang }) {
             </button>
           ))}
         </div>
+        <button className="btn-primary mt-4 w-full" onClick={downloadColorSquare} disabled={!color}>
+          <Download size={16} aria-hidden="true" />
+          {t(lang, "Скачать квадрат цвета", "Download color square")}
+        </button>
       </ToolPanel>
     </div>
   );
@@ -2773,7 +2960,7 @@ function AdvancedFfmpegTool({ kind, lang }: { kind: AdvancedFfmpegKind; lang: La
   const [target, setTarget] = useState("mp3");
   const [start, setStart] = useState(0);
   const [duration, setDuration] = useState(8);
-  const [quality, setQuality] = useState(28);
+  const [quality, setQuality] = useState(55);
   const [tempo, setTempo] = useState(1);
   const [volume, setVolume] = useState(1);
   const [progress, setProgress] = useState(0);
@@ -2809,7 +2996,7 @@ function AdvancedFfmpegTool({ kind, lang }: { kind: AdvancedFfmpegKind; lang: La
     "video-to-gif": t(lang, "Добавьте видео", "Upload video"),
     "media-trimmer": t(lang, "Добавьте видео или аудио", "Upload video or audio"),
     "audio-converter": t(lang, "Добавьте аудио", "Upload audio"),
-    "speed-volume": t(lang, "Добавьте аудио", "Upload audio")
+    "speed-volume": t(lang, "Добавьте видео или аудио", "Upload video or audio")
   }[kind];
 
   return (
@@ -2818,7 +3005,7 @@ function AdvancedFfmpegTool({ kind, lang }: { kind: AdvancedFfmpegKind; lang: La
         <DropZone title={title} description={t(lang, "Файл будет обработан на устройстве.", "The file will be processed on the device.")} accept="video/*,audio/*" files={files} maxSizeMb={180} onFiles={setFiles} />
         <div className="mt-5 grid gap-4 sm:grid-cols-3">
           {kind === "audio-converter" ? <label><span className="label">{t(lang, "Формат", "Format")}</span><select className="input" value={target} onChange={(event) => setTarget(event.target.value)}><option value="mp3">MP3</option><option value="wav">WAV</option><option value="ogg">OGG</option><option value="m4a">M4A</option></select></label> : null}
-          {kind === "video-compressor" ? <label><span className="label">CRF: {quality}</span><input className="w-full accent-[var(--accent)]" type="range" min="18" max="36" value={quality} onChange={(event) => setQuality(Number(event.target.value))} /></label> : null}
+          {kind === "video-compressor" ? <label><span className="label">{t(lang, "Степень сжатия", "Compression")}: {quality}%</span><input className="w-full accent-[var(--accent)]" type="range" min="10" max="90" value={quality} onChange={(event) => setQuality(Number(event.target.value))} /></label> : null}
           {kind === "video-to-gif" || kind === "media-trimmer" ? (
             <>
               <label><span className="label">{t(lang, "Старт, сек", "Start, sec")}</span><input className="input" type="number" min={0} value={start} onChange={(event) => setStart(Number(event.target.value))} /></label>
@@ -2915,6 +3102,8 @@ type FileAiKind = "image-ocr" | "transcription" | "document-converter";
 function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
   const [files, setFiles] = useState<File[]>([]);
   const [text, setText] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [message, setMessage] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -2924,19 +3113,50 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
     if (!file) return;
     setIsBusy(true);
     setError("");
+    setProgress(0);
+    setMessage("");
     try {
       if (kind === "image-ocr") {
-        setText(await callOcrFile(file));
+        try {
+          setText(await callOcrFile(file));
+        } catch {
+          setMessage(t(lang, "Уточнение результата", "Refining result"));
+          setText(await callGeminiFileTextApi(file, "Extract all readable text from this image. Return plain text only. Preserve line breaks where useful."));
+        }
       } else if (kind === "transcription") {
-        setText(await callTranscriptionApi(file));
+        try {
+          const outputName = replaceExtension(file.name, "speech.mp3");
+          const audioBytes = await runFfmpegJob(
+            file,
+            outputName,
+            (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", output],
+            (nextProgress, nextMessage) => {
+              setProgress(nextProgress);
+              setMessage(nextMessage);
+            }
+          );
+          setMessage(t(lang, "Распознавание речи", "Recognizing speech"));
+          const audioFile = new File([audioBytes], outputName, { type: "audio/mpeg" });
+          setText(await callGeminiFileTextApi(audioFile, "Transcribe this audio. Return plain text only. Keep the original language and add line breaks between meaningful phrases."));
+        } catch (reason) {
+          if (reason instanceof Error && /GEMINI_API_KEY|quota|model|fetch|network|memory|abort/i.test(reason.message)) throw reason;
+          setMessage(t(lang, "Запасной способ", "Fallback method"));
+          setText(await callTranscriptionApi(file));
+        }
       } else if (kind === "document-converter") {
-        setText(await callDocumentTextApi(file));
+        try {
+          setText(await callDocumentTextApi(file));
+        } catch {
+          setMessage(t(lang, "Уточнение результата", "Refining result"));
+          setText(await callGeminiFileTextApi(file, "Extract the useful text from this document. Preserve structure when possible and return plain text only."));
+        }
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось получить текст.");
       setText("");
     } finally {
       setIsBusy(false);
+      setProgress(0);
     }
   };
 
@@ -2949,9 +3169,9 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
           title={t(lang, "Добавьте файл", "Upload a file")}
           description={
             kind === "image-ocr"
-              ? t(lang, "Распознавание идёт через локальный OCR на сервере: русский и английский.", "Recognition uses local server OCR: Russian and English.")
+              ? t(lang, "Извлеките текст с изображения.", "Extract text from an image.")
               : kind === "transcription"
-                ? t(lang, "Аудио будет подготовлено и распознано через Windows Speech, если язык установлен.", "Audio will be prepared and recognized through Windows Speech when the language is installed.")
+                ? t(lang, "Получите текст из речи в аудио или видео.", "Get text from speech in audio or video.")
                 : t(lang, "PDF, DOCX, TXT и MD разбираются в аккуратный текст.", "PDF, DOCX, TXT, and MD are parsed into clean text.")
           }
           accept={accept}
@@ -2959,13 +3179,11 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
           maxSizeMb={70}
           onFiles={setFiles}
         />
-        {kind === "transcription" ? (
-          <p className="mt-4 text-sm leading-6 text-[var(--muted)]">{t(lang, "Для русского/английского распознавания должен быть установлен локальный speech-recognizer Windows.", "Russian/English recognition needs the local Windows speech recognizer.")}</p>
-        ) : null}
         <button className="btn-primary mt-5" onClick={process} disabled={!file || isBusy}>
           {isBusy ? <Loader2 className="animate-spin" size={16} aria-hidden="true" /> : <FileText size={16} aria-hidden="true" />}
           {t(lang, "Получить текст", "Get text")}
         </button>
+        {isBusy && (progress > 0 || message) ? <div className="mt-5"><ProgressBar value={progress || 12} label={message || t(lang, "Подготовка", "Preparing")} /></div> : null}
         <div className="mt-4"><ErrorMessage message={error} /></div>
       </ToolPanel>
       <ToolPanel>
@@ -4380,6 +4598,14 @@ function DeviceInfoTool({ lang }: { lang: Lang }) {
       .then((response) => response.ok ? response.json() : null)
       .then((data) => {
         if (alive && data) setClientInfo(data as { ip?: string; host?: string; protocol?: string });
+        if (alive && (!data?.ip || data.ip === "unknown")) {
+          return fetch("https://api.ipify.org?format=json")
+            .then((response) => response.ok ? response.json() : null)
+            .then((fallback) => {
+              if (alive && fallback?.ip) setClientInfo({ ...(data || {}), ip: fallback.ip });
+            });
+        }
+        return undefined;
       })
       .catch(() => undefined);
     return () => {

@@ -35,6 +35,8 @@ const { createWorker } = tesseract;
 let ocrWorkerPromise = null;
 let ocrQueue = Promise.resolve();
 
+app.set("trust proxy", true);
+
 const commonTessParams = {
   preserve_interword_spaces: "1",
   tessedit_pageseg_mode: "6",
@@ -506,11 +508,23 @@ function normalizeIp(value) {
 }
 
 function getClientIp(req) {
-  const forwarded = String(req.get("x-forwarded-for") || "")
-    .split(",")
-    .map((item) => normalizeIp(item))
-    .find(Boolean);
-  return forwarded || normalizeIp(req.ip) || normalizeIp(req.socket?.remoteAddress) || "";
+  const headerNames = [
+    "x-vercel-forwarded-for",
+    "x-forwarded-for",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "fastly-client-ip",
+    "true-client-ip",
+    "x-client-ip"
+  ];
+  for (const name of headerNames) {
+    const ip = String(req.get(name) || "")
+      .split(",")
+      .map((item) => normalizeIp(item))
+      .find(Boolean);
+    if (ip) return ip;
+  }
+  return normalizeIp(req.ip) || normalizeIp(req.socket?.remoteAddress) || "";
 }
 
 app.get("/api/health", (_req, res) => {

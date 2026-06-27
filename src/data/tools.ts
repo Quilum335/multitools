@@ -184,7 +184,7 @@ export const tools: Tool[] = [
     slug: "image-ocr",
     title: "Картинка в текст",
     shortTitle: "OCR",
-    description: "Распознавание текста на изображении через локальный OCR.",
+    description: "Распознавание текста на изображении.",
     category: "image",
     tags: ["ocr", "текст", "распознать"]
   },
@@ -258,7 +258,7 @@ export const tools: Tool[] = [
     slug: "video-compressor",
     title: "Сжатие видео",
     shortTitle: "Сжатие видео",
-    description: "Уменьшение веса роликов с прогрессом.",
+    description: "Быстрое уменьшение веса роликов со степенью сжатия.",
     category: "video",
     tags: ["сжать", "видео", "битрейт"]
   },
@@ -294,7 +294,7 @@ export const tools: Tool[] = [
     slug: "speed-volume",
     title: "Скорость и громкость",
     shortTitle: "Скорость",
-    description: "Изменение темпа и уровня аудио.",
+    description: "Изменение скорости и громкости видео или аудио.",
     category: "video",
     tags: ["громкость", "скорость", "tempo"]
   },
@@ -312,7 +312,7 @@ export const tools: Tool[] = [
     slug: "transcription",
     title: "Транскрипция",
     shortTitle: "Субтитры",
-    description: "Видео и аудио в текст через локальное распознавание Windows Speech.",
+    description: "Видео и аудио в текст.",
     category: "video",
     tags: ["whisper", "субтитры", "текст"]
   },
