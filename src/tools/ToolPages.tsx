@@ -2208,7 +2208,74 @@ function downloadText(text: string, fileName: string) {
   downloadBlob(new Blob([text], { type: "text/plain;charset=utf-8" }), fileName);
 }
 
-async function callOcrFile(file: File) {
+type BrowserOcrWorker = {
+  recognize: (image: File | Blob, options?: Record<string, unknown>) => Promise<{ data?: { text?: string } }>;
+  setParameters: (params: Record<string, string>) => Promise<unknown>;
+};
+
+type BrowserOcrProgress = {
+  status?: string;
+  progress?: number;
+};
+
+let browserOcrWorkerPromise: Promise<BrowserOcrWorker> | null = null;
+let browserOcrProgressHandler: ((info: BrowserOcrProgress) => void) | null = null;
+
+function formatOcrStatus(status: string, isEn: boolean) {
+  if (/core/i.test(status)) return isEn ? "Loading OCR engine" : "Загрузка OCR-движка";
+  if (/language|traineddata/i.test(status)) return isEn ? "Loading languages" : "Загрузка языков";
+  if (/initializing/i.test(status)) return isEn ? "Initializing OCR" : "Подготовка OCR";
+  if (/recognizing/i.test(status)) return isEn ? "Recognizing text" : "Распознавание текста";
+  return isEn ? "OCR processing" : "OCR-обработка";
+}
+
+async function loadBrowserOcrWorker(onProgress: (progress: number, message: string) => void, isEn: boolean) {
+  browserOcrProgressHandler = (info) => {
+    const rawProgress = Number.isFinite(info.progress) ? Number(info.progress) : 0;
+    const progress = Math.max(8, Math.min(92, Math.round(8 + rawProgress * 84)));
+    onProgress(progress, formatOcrStatus(String(info.status || ""), isEn));
+  };
+
+  if (!browserOcrWorkerPromise) {
+    browserOcrWorkerPromise = import("tesseract.js").then(async (module) => {
+      const createWorker = (module as { createWorker: (langs?: string, oem?: number, options?: Record<string, unknown>) => Promise<BrowserOcrWorker> }).createWorker;
+      const worker = await createWorker("eng+rus", 1, {
+        workerPath: "/tesseract/worker.min.js",
+        corePath: "/tesseract-core",
+        langPath: "/tessdata",
+        workerBlobURL: false,
+        gzip: true,
+        logger: (info: BrowserOcrProgress) => browserOcrProgressHandler?.(info)
+      });
+      await worker.setParameters({
+        preserve_interword_spaces: "1",
+        tessedit_pageseg_mode: "6",
+        user_defined_dpi: "300"
+      });
+      return worker;
+    });
+  }
+
+  try {
+    return await browserOcrWorkerPromise;
+  } catch (error) {
+    browserOcrWorkerPromise = null;
+    throw error;
+  }
+}
+
+async function callBrowserOcrFile(file: File, onProgress: (progress: number, message: string) => void, isEn: boolean) {
+  onProgress(6, isEn ? "Preparing image" : "Подготовка изображения");
+  const worker = await loadBrowserOcrWorker(onProgress, isEn);
+  onProgress(78, isEn ? "Recognizing text" : "Распознавание текста");
+  const result = await worker.recognize(file);
+  const text = result.data?.text?.trim() || "";
+  if (!text) throw new Error(isEn ? "No text was found in the image." : "Текст на изображении не найден.");
+  onProgress(100, isEn ? "Done" : "Готово");
+  return text;
+}
+
+async function callServerOcrFile(file: File) {
   const form = new FormData();
   form.append("image", file);
   const response = await fetch("/api/ocr", { method: "POST", body: form });
@@ -2217,6 +2284,21 @@ async function callOcrFile(file: File) {
   const text = data.text?.trim() || "";
   if (!text) throw new Error("Текст на изображении не найден.");
   return text;
+}
+
+async function callOcrFile(file: File, onProgress: (progress: number, message: string) => void, isEn: boolean) {
+  try {
+    return await callBrowserOcrFile(file, onProgress, isEn);
+  } catch (reason) {
+    const browserError = reason instanceof Error ? reason.message : isEn ? "Browser OCR failed." : "Браузерный OCR не сработал.";
+    try {
+      onProgress(82, isEn ? "Trying server OCR" : "Пробую серверный OCR");
+      return await callServerOcrFile(file);
+    } catch (fallbackReason) {
+      const serverError = fallbackReason instanceof Error ? fallbackReason.message : isEn ? "Server OCR failed." : "Серверный OCR не сработал.";
+      throw new Error(`${browserError}\n${serverError}`);
+    }
+  }
 }
 
 async function callTranslationApi(text: string, source: string, target: string) {
@@ -3217,7 +3299,10 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
       if (kind === "image-ocr") {
         setProgress(12);
         setMessage(t(lang, "Распознавание текста", "Recognizing text"));
-        setText(await callOcrFile(file));
+        setText(await callOcrFile(file, (nextProgress, nextMessage) => {
+          setProgress(nextProgress);
+          setMessage(nextMessage);
+        }, lang === "en"));
       } else if (kind === "transcription") {
         try {
           setText(await transcribeWithLocalWhisper(file, (nextProgress, nextMessage) => {
