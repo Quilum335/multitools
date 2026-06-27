@@ -118,7 +118,7 @@ const enTools: Record<string, { title: string; shortTitle: string; description: 
   "photo-color-picker": { title: "Photo color picker", shortTitle: "Picker", description: "Pick a color from an image and export a palette." },
   "face-blur": { title: "Face and plate blur", shortTitle: "Blur", description: "Protect personal data in photos." },
   "watermark": { title: "Watermark", shortTitle: "Watermark", description: "Add text or a logo to an image." },
-  "video-converter": { title: "Video converter", shortTitle: "Video", description: "Convert MP4, WebM, MOV, and GIF through local backend ffmpeg." },
+  "video-converter": { title: "Video converter", shortTitle: "Video", description: "Convert MP4, WebM, MOV, and GIF with visible progress." },
   "audio-extractor": { title: "Extract audio", shortTitle: "MP4 to MP3", description: "Extract an audio track from video and download MP3." },
   "video-compressor": { title: "Video compression", shortTitle: "Video compression", description: "Reduce video file size with visible progress." },
   "video-to-gif": { title: "Video to GIF", shortTitle: "GIF", description: "Create short GIF animations from videos." },

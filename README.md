@@ -2,7 +2,7 @@
 
 MultiTool — локальный веб-сайт с набором практичных инструментов для картинок, видео, аудио, документов, текста, задач разработчика и повседневных утилит.
 
-Фронтенд собран на React, TypeScript, Vite и Tailwind CSS. Локальный backend на Express используется для тяжёлых задач, API-интеграций, OCR, документов и медиаобработки.
+Фронтенд собран на React, TypeScript, Vite и Tailwind CSS. Express используется для API-интеграций, OCR, документов и внешних сервисов, а медиа-инструменты FFmpeg обрабатывают файлы на устройстве пользователя через статический wasm-core.
 
 ## Возможности
 
@@ -74,7 +74,7 @@ http://127.0.0.1:8787
 
 - `vercel.json` задаёт build command `npm run build` и output directory `dist`;
 - `/api/*` направляется в Express-приложение через Vercel Function;
-- `/ffmpeg-core/*` направляется в Express-приложение для браузерного FFmpeg;
+- `npm run build` копирует `@ffmpeg/core` в `public/ffmpeg-core`, после чего Vercel отдаёт FFmpeg-core как статические файлы;
 - остальные маршруты работают как SPA и возвращают `index.html`;
 - секреты берутся из переменных окружения Vercel, а не из репозитория.
 
@@ -94,7 +94,7 @@ GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
 - `npm run dev` — клиент и сервер одновременно.
 - `npm run dev:client` — только Vite-клиент.
 - `npm run server` — только Express-сервер.
-- `npm run build` — TypeScript-проверка и production-сборка в `dist`.
+- `npm run build` — копирование FFmpeg-core, TypeScript-проверка и production-сборка в `dist`.
 - `npm run preview` — Vite preview.
 
 
@@ -122,7 +122,6 @@ dist/                Production-сборка.
 - `POST /api/ocr` — OCR изображения.
 - `POST /api/document-text` — извлечение текста из документов.
 - `POST /api/transcribe` — транскрипция аудио/видео.
-- `POST /api/ffmpeg-run` — backend-задачи FFmpeg.
 - `POST /api/shorten` — создание локальной короткой ссылки.
 
 ## Локальный адрес

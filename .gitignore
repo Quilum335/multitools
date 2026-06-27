@@ -1,5 +1,6 @@
 node_modules/
 dist/
+public/ffmpeg-core/
 .env
 .env.*
 !.env.example
@@ -13,4 +14,5 @@ vite.config.d.ts
 *.zip
 *.docx
 montaz/
+video/
 TZ_multitool_site.md

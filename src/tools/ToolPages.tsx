@@ -25,6 +25,7 @@ import {
   downloadBlob,
   downloadUrl,
   formatBytes,
+  getExtension,
   loadImage,
   makeObjectResult,
   parsePageRanges,
@@ -41,6 +42,8 @@ type ToolRendererProps = {
 };
 
 type ImageFormat = "png" | "jpeg" | "webp" | "avif";
+type CanvasImageFormat = "png" | "jpeg" | "webp";
+type CompressImageFormat = CanvasImageFormat | "source";
 
 const imageMime: Record<ImageFormat, string> = {
   png: "image/png",
@@ -55,6 +58,70 @@ const imageLabels: Record<ImageFormat, string> = {
   webp: "WebP",
   avif: "AVIF"
 };
+
+const imageOutputMeta: Record<CanvasImageFormat, { mime: string; extension: string; supportsAlpha: boolean }> = {
+  png: { mime: "image/png", extension: "png", supportsAlpha: true },
+  jpeg: { mime: "image/jpeg", extension: "jpg", supportsAlpha: false },
+  webp: { mime: "image/webp", extension: "webp", supportsAlpha: true }
+};
+
+function getCanvasOutputForFile(file: File, requested: CompressImageFormat) {
+  if (requested !== "source") return imageOutputMeta[requested];
+
+  const extension = getExtension(file.name);
+  if (extension === "jpg" || extension === "jpeg") {
+    return { ...imageOutputMeta.jpeg, extension };
+  }
+  if (extension === "webp") return imageOutputMeta.webp;
+  if (extension === "png") return imageOutputMeta.png;
+  return imageOutputMeta.png;
+}
+
+function drawImageOnCanvas(image: HTMLImageElement, width = image.naturalWidth, height = image.naturalHeight, matteColor?: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas недоступен.");
+  if (matteColor) {
+    ctx.fillStyle = matteColor;
+    ctx.fillRect(0, 0, width, height);
+  }
+  ctx.drawImage(image, 0, 0, width, height);
+  return canvas;
+}
+
+function compositeCanvasOverColor(source: HTMLCanvasElement, color: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas недоступен.");
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, 0, 0);
+  return canvas;
+}
+
+function hexToRgbColor(value: string): [number, number, number] {
+  const raw = value.replace("#", "").trim();
+  const hex = raw.length === 3 ? raw.split("").map((part) => `${part}${part}`).join("") : raw.padEnd(6, "0").slice(0, 6);
+  const parsed = Number.parseInt(hex, 16);
+  if (!Number.isFinite(parsed)) return [255, 255, 255];
+  return [(parsed >> 16) & 255, (parsed >> 8) & 255, parsed & 255];
+}
+
+function mediaMimeFromName(name: string) {
+  const extension = getExtension(name);
+  if (extension === "webm") return "video/webm";
+  if (extension === "mov") return "video/quicktime";
+  if (extension === "gif") return "image/gif";
+  if (extension === "mp3") return "audio/mpeg";
+  if (extension === "wav") return "audio/wav";
+  if (extension === "ogg") return "audio/ogg";
+  if (extension === "m4a") return "audio/mp4";
+  return "video/mp4";
+}
 
 async function loadPdfDocument() {
   const module = await import("pdf-lib");
@@ -415,7 +482,7 @@ function drawResizePlan(ctx: CanvasRenderingContext2D, image: HTMLImageElement, 
 
 function ImageCompressorTool() {
   const [files, setFiles] = useState<File[]>([]);
-  const [format, setFormat] = useState<"png" | "jpeg" | "webp">("webp");
+  const [format, setFormat] = useState<CompressImageFormat>("source");
   const [quality, setQuality] = useState(0.72);
   const [maxSide, setMaxSide] = useState(1920);
   const [isBusy, setIsBusy] = useState(false);
@@ -432,14 +499,10 @@ function ImageCompressorTool() {
       const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
       const width = Math.max(1, Math.round(image.naturalWidth * ratio));
       const height = Math.max(1, Math.round(image.naturalHeight * ratio));
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Canvas недоступен.");
-      ctx.drawImage(image, 0, 0, width, height);
-      const blob = await canvasToBlob(canvas, imageMime[format], format === "png" ? undefined : quality);
-      setResult(makeObjectResult(replaceExtension(file.name, format === "jpeg" ? "jpg" : format), blob, file.size));
+      const output = getCanvasOutputForFile(file, format);
+      const canvas = drawImageOnCanvas(image, width, height, output.supportsAlpha ? undefined : "#ffffff");
+      const blob = await canvasToBlob(canvas, output.mime, output.extension === "png" ? undefined : quality);
+      setResult(makeObjectResult(replaceExtension(file.name, output.extension), blob, file.size));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось сжать изображение.");
       setResult(null);
@@ -462,7 +525,8 @@ function ImageCompressorTool() {
         <div className="mt-5 grid gap-4 sm:grid-cols-3">
           <label>
             <span className="label">Формат</span>
-            <select className="input" value={format} onChange={(event) => setFormat(event.target.value as "png" | "jpeg" | "webp")}>
+            <select className="input" value={format} onChange={(event) => setFormat(event.target.value as CompressImageFormat)}>
+              <option value="source">Как у исходника</option>
               <option value="webp">WebP</option>
               <option value="jpeg">JPG</option>
               <option value="png">PNG</option>
@@ -481,7 +545,7 @@ function ImageCompressorTool() {
               max="0.98"
               step="0.01"
               value={quality}
-              disabled={format === "png"}
+              disabled={file ? getCanvasOutputForFile(file, format).extension === "png" : format === "png"}
               onChange={(event) => setQuality(Number(event.target.value))}
             />
           </label>
@@ -871,41 +935,104 @@ async function runFfmpegJob(
   return data instanceof Uint8Array ? data : new TextEncoder().encode(data);
 }
 
-async function runBackendMediaJob(
-  file: File,
-  fields: Record<string, string | number>,
-  onProgress: (progress: number, message: string) => void
-) {
-  onProgress(10, "Загрузка файла");
-  const form = new FormData();
-  form.append("file", file);
-  Object.entries(fields).forEach(([key, value]) => form.append(key, String(value)));
+type FfmpegJobConfig = {
+  outputName: string;
+  args: (inputName: string, outputName: string) => string[];
+};
 
-  let visualProgress = 18;
-  const tick = window.setInterval(() => {
-    visualProgress = Math.min(94, visualProgress + 4);
-    onProgress(visualProgress, "Обработка на локальном backend");
-  }, 900);
-  try {
-    const response = await fetch("/api/ffmpeg-run", { method: "POST", body: form });
-    const blob = await response.blob();
-    if (!response.ok) {
-      let message = response.statusText;
-      try {
-        const data = JSON.parse(await blob.text()) as { error?: string };
-        message = data.error || message;
-      } catch {
-        // Binary error fallback.
-      }
-      throw new Error(message);
-    }
-    const rawName = response.headers.get("X-Output-Name");
-    const name = rawName ? decodeURIComponent(rawName) : replaceExtension(file.name, String(fields.target || "mp4"));
-    onProgress(100, "Готово");
-    return makeObjectResult(name, blob, file.size);
-  } finally {
-    window.clearInterval(tick);
+function makeMediaResult(outputName: string, data: Uint8Array, sizeBefore: number) {
+  return makeObjectResult(outputName, new Blob([data], { type: mediaMimeFromName(outputName) }), sizeBefore);
+}
+
+function buildBasicMediaJob(file: File, mode: FfmpegMode, target: "mp4" | "webm" | "gif"): FfmpegJobConfig {
+  if (mode === "audio") {
+    return {
+      outputName: replaceExtension(file.name, "mp3"),
+      args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-b:a", "192k", output]
+    };
   }
+
+  if (target === "gif") {
+    return {
+      outputName: replaceExtension(file.name, "gif"),
+      args: (input, output) => [
+        "-hide_banner", "-loglevel", "error", "-y", "-i", input,
+        "-vf", "fps=12,scale=720:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
+        "-loop", "0",
+        output
+      ]
+    };
+  }
+
+  if (target === "webm") {
+    return {
+      outputName: replaceExtension(file.name, "webm"),
+      args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-c:a", "libopus", "-b:a", "128k", output]
+    };
+  }
+
+  return {
+    outputName: replaceExtension(file.name, "mp4"),
+    args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", output]
+  };
+}
+
+function buildAdvancedMediaJob(
+  file: File,
+  kind: AdvancedFfmpegKind,
+  fields: { target: string; start: number; duration: number; quality: number; tempo: number; volume: number }
+): FfmpegJobConfig {
+  const start = Math.max(0, fields.start);
+  const duration = Math.min(600, Math.max(0.1, fields.duration));
+  const quality = Math.min(40, Math.max(16, fields.quality));
+  const tempo = Math.min(2, Math.max(0.5, fields.tempo));
+  const volume = Math.min(3, Math.max(0.2, fields.volume));
+
+  if (kind === "video-compressor") {
+    return {
+      outputName: replaceExtension(file.name, "mp4"),
+      args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", String(quality), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output]
+    };
+  }
+
+  if (kind === "video-to-gif") {
+    return {
+      outputName: replaceExtension(file.name, "gif"),
+      args: (input, output) => [
+        "-hide_banner", "-loglevel", "error", "-y", "-ss", String(start), "-t", String(duration), "-i", input,
+        "-vf", "fps=12,scale=720:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
+        "-loop", "0",
+        output
+      ]
+    };
+  }
+
+  if (kind === "media-trimmer") {
+    const sourceExtension = getExtension(file.name);
+    const outputExtension = ["mp4", "mov", "webm", "mp3", "wav", "ogg", "m4a"].includes(sourceExtension) ? sourceExtension : "mp4";
+    return {
+      outputName: replaceExtension(file.name, `trimmed.${outputExtension}`),
+      args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(start), "-t", String(duration), "-i", input, "-map", "0:v?", "-map", "0:a?", "-c", "copy", output]
+    };
+  }
+
+  if (kind === "audio-converter") {
+    const extension = ["mp3", "wav", "ogg", "m4a"].includes(fields.target) ? fields.target : "mp3";
+    return {
+      outputName: replaceExtension(file.name, extension),
+      args: (input, output) => {
+        if (extension === "wav") return ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", output];
+        if (extension === "ogg") return ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-c:a", "libvorbis", "-q:a", "5", output];
+        if (extension === "m4a") return ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-c:a", "aac", "-b:a", "192k", output];
+        return ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-b:a", "192k", output];
+      }
+    };
+  }
+
+  return {
+    outputName: replaceExtension(file.name, "mp3"),
+    args: (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-filter:a", `atempo=${tempo.toFixed(2)},volume=${volume.toFixed(2)}`, "-vn", "-b:a", "192k", output]
+  };
 }
 
 function FfmpegTool({ mode }: { mode: FfmpegMode }) {
@@ -925,16 +1052,12 @@ function FfmpegTool({ mode }: { mode: FfmpegMode }) {
     setProgress(0);
     setMessage("");
     try {
-      const extension = mode === "audio" ? "mp3" : target;
-      const result = await runBackendMediaJob(
-        file,
-        { job: mode, target: extension },
-        (nextProgress, nextMessage) => {
-          setProgress(nextProgress);
-          setMessage(nextMessage);
-        }
-      );
-      setResult(result);
+      const job = buildBasicMediaJob(file, mode, target);
+      const data = await runFfmpegJob(file, job.outputName, job.args, (nextProgress, nextMessage) => {
+        setProgress(nextProgress);
+        setMessage(nextMessage);
+      });
+      setResult(makeMediaResult(job.outputName, data, file.size));
     } catch (reason) {
       setError(
         formatUnknownError(reason, "Не удалось обработать файл. Попробуйте другой формат или файл меньшего размера.")
@@ -950,7 +1073,7 @@ function FfmpegTool({ mode }: { mode: FfmpegMode }) {
       <ToolPanel>
         <DropZone
           title={mode === "audio" ? "Добавьте видео" : "Добавьте видеофайл"}
-          description={mode === "audio" ? "Аудиодорожка будет извлечена в MP3 на локальном backend." : "Обработка идёт на локальном backend через ffmpeg, без браузерного wasm."}
+          description={mode === "audio" ? "Аудиодорожка будет извлечена в MP3." : "Файл будет подготовлен в выбранном формате."}
           accept="video/*,audio/*"
           files={files}
           maxSizeMb={180}
@@ -2073,6 +2196,9 @@ function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, 
 
 function BackgroundRemoverTool({ lang }: { lang: Lang }) {
   const [files, setFiles] = useState<File[]>([]);
+  const [sourceMode, setSourceMode] = useState<"corner" | "color">("corner");
+  const [keyColor, setKeyColor] = useState("#ffffff");
+  const [matteColor, setMatteColor] = useState("#ffffff");
   const [tolerance, setTolerance] = useState(42);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState("");
@@ -2093,7 +2219,7 @@ function BackgroundRemoverTool({ lang }: { lang: Lang }) {
       ctx.drawImage(image, 0, 0);
       const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = frame.data;
-      const key = [data[0], data[1], data[2]];
+      const key = sourceMode === "color" ? hexToRgbColor(keyColor) : [data[0], data[1], data[2]];
       const soft = tolerance * 1.8;
       for (let index = 0; index < data.length; index += 4) {
         const distance = Math.hypot(data[index] - key[0], data[index + 1] - key[1], data[index + 2] - key[2]);
@@ -2101,8 +2227,10 @@ function BackgroundRemoverTool({ lang }: { lang: Lang }) {
         else if (distance < soft) data[index + 3] = Math.round(255 * ((distance - tolerance) / (soft - tolerance)));
       }
       ctx.putImageData(frame, 0, 0);
-      const blob = await canvasToBlob(canvas, "image/png");
-      setResult(makeObjectResult(replaceExtension(file.name, "transparent.png"), blob, file.size));
+      const output = getCanvasOutputForFile(file, "source");
+      const exportCanvas = output.supportsAlpha ? canvas : compositeCanvasOverColor(canvas, matteColor);
+      const blob = await canvasToBlob(exportCanvas, output.mime, output.extension === "png" ? undefined : 0.9);
+      setResult(makeObjectResult(replaceExtension(file.name, output.extension), blob, file.size));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить фон.");
       setResult(null);
@@ -2116,12 +2244,31 @@ function BackgroundRemoverTool({ lang }: { lang: Lang }) {
       <ToolPanel>
         <DropZone
           title={t(lang, "Добавьте изображение", "Upload an image")}
-          description={t(lang, "Цвет фона берётся из левого верхнего пикселя. Лучше всего работает на однотонном фоне.", "The background color is sampled from the top-left pixel. Best for solid backgrounds.")}
+          description={t(lang, "Цвет фона можно взять из угла или выбрать вручную. Лучше всего работает на однотонном фоне.", "The background color can be sampled from the corner or picked manually. Best for solid backgrounds.")}
           accept="image/*"
           files={files}
           maxSizeMb={40}
           onFiles={setFiles}
         />
+        <div className="mt-5 grid gap-4 sm:grid-cols-3">
+          <label>
+            <span className="label">{t(lang, "Источник цвета", "Color source")}</span>
+            <select className="input" value={sourceMode} onChange={(event) => setSourceMode(event.target.value as "corner" | "color")}>
+              <option value="corner">{t(lang, "Левый верхний пиксель", "Top-left pixel")}</option>
+              <option value="color">{t(lang, "Выбрать цвет", "Pick color")}</option>
+            </select>
+          </label>
+          {sourceMode === "color" ? (
+            <label>
+              <span className="label">{t(lang, "Цвет фона", "Background color")}</span>
+              <input className="input h-12 p-1" type="color" value={keyColor} onChange={(event) => setKeyColor(event.target.value)} />
+            </label>
+          ) : null}
+          <label>
+            <span className="label">{t(lang, "Подложка JPG", "JPG matte")}</span>
+            <input className="input h-12 p-1" type="color" value={matteColor} onChange={(event) => setMatteColor(event.target.value)} />
+          </label>
+        </div>
         <label className="mt-5 block">
           <span className="label">{t(lang, "Допуск цвета", "Color tolerance")}: {tolerance}</span>
           <input className="w-full accent-[var(--accent)]" type="range" min="5" max="130" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} />
@@ -2628,16 +2775,14 @@ function AdvancedFfmpegTool({ kind, lang }: { kind: AdvancedFfmpegKind; lang: La
     setIsBusy(true);
     setError("");
     setProgress(0);
+    setMessage("");
     try {
-      const result = await runBackendMediaJob(
-        file,
-        { job: kind, target, start, duration, quality, tempo, volume },
-        (nextProgress, nextMessage) => {
-          setProgress(nextProgress);
-          setMessage(nextMessage);
-        }
-      );
-      setResult(result);
+      const job = buildAdvancedMediaJob(file, kind, { target, start, duration, quality, tempo, volume });
+      const data = await runFfmpegJob(file, job.outputName, job.args, (nextProgress, nextMessage) => {
+        setProgress(nextProgress);
+        setMessage(nextMessage);
+      });
+      setResult(makeMediaResult(job.outputName, data, file.size));
     } catch (reason) {
       setError(formatUnknownError(reason, "Не удалось обработать файл."));
       setResult(null);
@@ -2657,7 +2802,7 @@ function AdvancedFfmpegTool({ kind, lang }: { kind: AdvancedFfmpegKind; lang: La
   return (
     <div className="grid gap-5 lg:grid-cols-[1.05fr_.95fr]">
       <ToolPanel>
-        <DropZone title={title} description={t(lang, "Обработка выполняется на локальном backend через ffmpeg.", "Processing runs on the local backend through ffmpeg.")} accept="video/*,audio/*" files={files} maxSizeMb={180} onFiles={setFiles} />
+        <DropZone title={title} description={t(lang, "Файл будет обработан на устройстве.", "The file will be processed on the device.")} accept="video/*,audio/*" files={files} maxSizeMb={180} onFiles={setFiles} />
         <div className="mt-5 grid gap-4 sm:grid-cols-3">
           {kind === "audio-converter" ? <label><span className="label">{t(lang, "Формат", "Format")}</span><select className="input" value={target} onChange={(event) => setTarget(event.target.value)}><option value="mp3">MP3</option><option value="wav">WAV</option><option value="ogg">OGG</option><option value="m4a">M4A</option></select></label> : null}
           {kind === "video-compressor" ? <label><span className="label">CRF: {quality}</span><input className="w-full accent-[var(--accent)]" type="range" min="18" max="36" value={quality} onChange={(event) => setQuality(Number(event.target.value))} /></label> : null}
@@ -2793,7 +2938,7 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
             kind === "image-ocr"
               ? t(lang, "Распознавание идёт через локальный OCR на сервере: русский и английский.", "Recognition uses local server OCR: Russian and English.")
               : kind === "transcription"
-                ? t(lang, "Backend извлечёт аудио и распознает через локальный Windows Speech, если язык установлен.", "The backend extracts audio and uses local Windows Speech when the language is installed.")
+                ? t(lang, "Аудио будет подготовлено и распознано через Windows Speech, если язык установлен.", "Audio will be prepared and recognized through Windows Speech when the language is installed.")
                 : t(lang, "PDF, DOCX, TXT и MD разбираются в аккуратный текст.", "PDF, DOCX, TXT, and MD are parsed into clean text.")
           }
           accept={accept}

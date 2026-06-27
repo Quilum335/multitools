@@ -7,7 +7,7 @@
     "dev": "concurrently -k -n client,server \"npm:dev:client\" \"npm:server\"",
     "dev:client": "vite --host 127.0.0.1",
     "server": "node server/index.mjs",
-    "build": "tsc -p tsconfig.app.json && vite build",
+    "build": "node scripts/copy-ffmpeg-core.mjs && tsc -p tsconfig.app.json && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.mjs"
   },

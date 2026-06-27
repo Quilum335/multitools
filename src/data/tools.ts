@@ -238,7 +238,7 @@ export const tools: Tool[] = [
     slug: "video-converter",
     title: "Конвертер видео",
     shortTitle: "Видео",
-    description: "MP4, WebM, MOV и GIF через локальный backend ffmpeg.",
+    description: "MP4, WebM, MOV и GIF с понятным прогрессом.",
     category: "video",
     popular: true,
     tags: ["mp4", "webm", "mov", "avi", "gif", "конвертер", "видео"]
