@@ -2317,15 +2317,74 @@ function isPdfFile(file: File) {
 }
 
 function normalizeExtractedText(text: string) {
-  return text
+  return repairPdfMojibake(text)
     .replace(/\u0000/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([([{«])\s+/g, "$1")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
+function countMatches(text: string, pattern: RegExp) {
+  return (text.match(pattern) || []).length;
+}
+
+function textLayerQuality(text: string) {
+  const cyrillic = countMatches(text, /[\u0400-\u04ff]/g);
+  const latin = countMatches(text, /[A-Za-z]/g);
+  const digits = countMatches(text, /\d/g);
+  const mojibake = countMatches(text, /[\u00c0-\u00ff]/g);
+  const useful = cyrillic + latin + digits;
+  return { cyrillic, latin, digits, mojibake, useful };
+}
+
+function isLikelyBrokenPdfText(text: string) {
+  const quality = textLayerQuality(text);
+  return quality.mojibake >= 10 && quality.mojibake > quality.cyrillic * 0.18;
+}
+
+function repairWindows1251Segment(segment: string) {
+  if (countMatches(segment, /[\u00c0-\u00ff]/g) < 2) return segment;
+  const before = textLayerQuality(segment);
+  const textChars = countMatches(segment, /[A-Za-z\u00c0-\u00ff]/g);
+  const mojibakeRatio = textChars ? before.mojibake / textChars : 0;
+  const bytes: number[] = [];
+  for (const char of segment) {
+    const code = char.charCodeAt(0);
+    if (code > 255) return segment;
+    bytes.push(code);
+  }
+
+  try {
+    const decoded = new TextDecoder("windows-1251").decode(new Uint8Array(bytes));
+    const after = textLayerQuality(decoded);
+    const decodedLetters = countMatches(decoded, /[\p{L}]/gu);
+    const cyrillicRatio = decodedLetters ? after.cyrillic / decodedLetters : 0;
+    if (after.cyrillic >= 2 && after.cyrillic > before.cyrillic && after.mojibake < before.mojibake && (mojibakeRatio > 0.45 || cyrillicRatio > 0.45)) {
+      return decoded;
+    }
+  } catch {
+    return segment;
+  }
+
+  return segment;
+}
+
+function repairPdfMojibake(text: string) {
+  return text
+    .split("\n")
+    .map((line) => {
+      const repairedLine = line.replace(/[\x00-\xff]+/g, (segment) => repairWindows1251Segment(segment));
+      return repairedLine.replace(/[A-Za-z\u00c0-\u00ff]+(?:[-'][A-Za-z\u00c0-\u00ff]+)*/g, (segment) => repairWindows1251Segment(segment));
+    })
+    .join("\n");
+}
+
 function hasUsefulTextLayer(text: string) {
-  return (text.match(/[\p{L}\p{N}]/gu) || []).length >= 12;
+  return (text.match(/[\p{L}\p{N}]/gu) || []).length >= 12 && !isLikelyBrokenPdfText(text);
 }
 
 type PdfTextItem = {
