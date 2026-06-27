@@ -231,18 +231,29 @@ function runProcess(command, args, timeoutMs = 120000) {
 async function extractDocumentText(file) {
   const name = String(file.originalname || "").toLowerCase();
   const mime = String(file.mimetype || "").toLowerCase();
+  const isTextDocument = mime.startsWith("text/") || name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".json") || name.endsWith(".html");
+  const isDocx = name.endsWith(".docx") || mime.includes("wordprocessingml");
+  const isPdf = name.endsWith(".pdf") || mime.includes("pdf");
 
-  if (mime.startsWith("text/") || name.endsWith(".txt") || name.endsWith(".md") || name.endsWith(".json") || name.endsWith(".html")) {
+  if (name.endsWith(".doc")) {
+    throw new Error("Старый формат .doc локально читается ненадёжно. Сохраните файл как .docx или PDF.");
+  }
+
+  if (!isTextDocument && !isDocx && !isPdf) {
+    throw new Error("Этот формат документа пока не поддерживается локальным конвертером.");
+  }
+
+  if (isTextDocument) {
     return file.buffer.toString("utf8");
   }
 
-  if (name.endsWith(".docx") || mime.includes("wordprocessingml")) {
+  if (isDocx) {
     const mammoth = await import("mammoth");
     const result = await mammoth.extractRawText({ buffer: file.buffer });
     return result.value.trim();
   }
 
-  if (name.endsWith(".pdf") || mime.includes("pdf")) {
+  if (isPdf) {
     const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: file.buffer });
     try {
@@ -252,12 +263,6 @@ async function extractDocumentText(file) {
       await parser.destroy();
     }
   }
-
-  if (name.endsWith(".doc")) {
-    throw new Error("Старый .doc без LibreOffice/antiword локально не читается надёжно. Сохраните файл как .docx или PDF.");
-  }
-
-  throw new Error("Этот формат документа пока не поддерживается локальным конвертером.");
 }
 
 async function extractAudioForTranscription(file) {
@@ -305,6 +310,9 @@ foreach ($cultureName in $cultureNames) {
   } catch {}
 }
 if ($null -eq $recognizer) {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  [Console]::Write('__ERROR__Локальный распознаватель речи Windows для ru-RU/en-US не установлен.')
+  exit 2
   throw 'Локальный распознаватель речи Windows для ru-RU/en-US не установлен.'
 }
 $grammar = New-Object System.Speech.Recognition.DictationGrammar
@@ -343,7 +351,10 @@ $recognizer.Dispose()
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve(stdout.trim());
+      if (code !== 0 && !stderr.trim()) stderr = "Локальная транскрипция недоступна.";
+      const cleanStdout = stdout.trim();
+      if (code === 0) resolve(cleanStdout);
+      else if (cleanStdout.startsWith("__ERROR__")) reject(new Error(cleanStdout.slice("__ERROR__".length)));
       else reject(new Error(stderr.trim() || "Локальная транскрипция недоступна."));
     });
   });

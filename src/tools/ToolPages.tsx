@@ -2252,15 +2252,113 @@ async function callTranscriptionApi(file: File) {
   return text;
 }
 
-async function callGeminiFileTextApi(file: File, prompt: string) {
-  const form = new FormData();
-  form.append("file", file);
-  form.append("prompt", prompt);
-  const response = await fetch("/api/file-text", { method: "POST", body: form });
-  const data = (await response.json().catch(() => ({}))) as { text?: string; error?: string };
-  if (!response.ok) throw new Error(data.error || response.statusText);
-  const text = data.text?.trim() || "";
-  if (!text) throw new Error("Сервис не вернул текст.");
+type WhisperProgressInfo = {
+  status?: string;
+  progress?: number;
+  file?: string;
+  name?: string;
+};
+
+type LocalWhisperPipeline = (audio: Float32Array, options?: Record<string, unknown>) => Promise<unknown>;
+
+let localWhisperPromise: Promise<LocalWhisperPipeline> | null = null;
+
+function extractAsrText(result: unknown): string {
+  if (typeof result === "string") return result.trim();
+  if (Array.isArray(result)) {
+    return result
+      .map((item) => (item && typeof item === "object" && "text" in item ? String((item as { text?: unknown }).text || "") : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  if (result && typeof result === "object" && "text" in result) {
+    return String((result as { text?: unknown }).text || "").trim();
+  }
+  return "";
+}
+
+async function decodeAudioForWhisper(bytes: Uint8Array) {
+  const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextClass) throw new Error("Браузер не поддерживает декодирование аудио.");
+  const context = new AudioContextClass({ sampleRate: 16000 });
+  try {
+    const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const buffer = await context.decodeAudioData(copy);
+    if (buffer.numberOfChannels === 1) return buffer.getChannelData(0).slice();
+
+    const length = buffer.length;
+    const mixed = new Float32Array(length);
+    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+      const data = buffer.getChannelData(channel);
+      for (let index = 0; index < length; index += 1) mixed[index] += data[index] / buffer.numberOfChannels;
+    }
+    return mixed;
+  } finally {
+    void context.close();
+  }
+}
+
+async function loadLocalWhisper(onProgress: (progress: number, message: string) => void) {
+  if (localWhisperPromise) {
+    onProgress(70, "Локальная модель готова");
+    return localWhisperPromise;
+  }
+
+  onProgress(35, "Загрузка локальной модели");
+  localWhisperPromise = import("@xenova/transformers").then(async (module) => {
+    const env = (module as { env?: { allowLocalModels?: boolean; useBrowserCache?: boolean; backends?: { onnx?: { wasm?: { numThreads?: number } } } } }).env;
+    if (env) {
+      env.allowLocalModels = false;
+      env.useBrowserCache = true;
+      if (env.backends?.onnx?.wasm) env.backends.onnx.wasm.numThreads = 1;
+    }
+
+    const pipeline = (module as { pipeline: (task: string, model: string, options?: Record<string, unknown>) => Promise<LocalWhisperPipeline> }).pipeline;
+    return pipeline("automatic-speech-recognition", "Xenova/whisper-tiny", {
+      quantized: true,
+      progress_callback: (info: WhisperProgressInfo) => {
+        if (info.status === "progress" && Number.isFinite(info.progress)) {
+          onProgress(35 + Math.round(Math.min(100, Math.max(0, Number(info.progress))) * 0.34), `Загрузка модели ${Math.round(Number(info.progress))}%`);
+        } else if (info.status === "ready") {
+          onProgress(70, "Локальная модель готова");
+        }
+      }
+    });
+  });
+
+  try {
+    return await localWhisperPromise;
+  } catch (error) {
+    localWhisperPromise = null;
+    throw error;
+  }
+}
+
+async function transcribeWithLocalWhisper(file: File, onProgress: (progress: number, message: string) => void) {
+  const outputName = replaceExtension(file.name, "speech.wav");
+  const audioBytes = await runFfmpegJob(
+    file,
+    outputName,
+    (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-t", "900", "-acodec", "pcm_s16le", "-f", "wav", output],
+    (nextProgress, nextMessage) => {
+      onProgress(Math.min(32, Math.max(5, Math.round(nextProgress * 0.32))), nextMessage);
+    }
+  );
+
+  onProgress(34, "Подготовка аудио");
+  const audio = await decodeAudioForWhisper(audioBytes);
+  const transcriber = await loadLocalWhisper(onProgress);
+  onProgress(72, "Распознавание речи");
+  const result = await transcriber(audio, {
+    chunk_length_s: 30,
+    stride_length_s: 5,
+    task: "transcribe",
+    return_timestamps: false
+  });
+  const text = extractAsrText(result);
+  if (!text) throw new Error("Локальная модель не нашла разборчивую речь в файле.");
+  onProgress(100, "Готово");
   return text;
 }
 
@@ -3117,41 +3215,30 @@ function FileAiTextTool({ kind, lang }: { kind: FileAiKind; lang: Lang }) {
     setMessage("");
     try {
       if (kind === "image-ocr") {
-        try {
-          setMessage(t(lang, "Распознавание текста", "Recognizing text"));
-          setText(await callGeminiFileTextApi(file, "Extract all readable text from this image. Return plain text only. Preserve line breaks where useful."));
-        } catch (reason) {
-          if (reason instanceof Error && /GEMINI_API_KEY|quota|model|fetch|network/i.test(reason.message)) throw reason;
-          setMessage(t(lang, "Уточнение результата", "Refining result"));
-          setText(await callOcrFile(file));
-        }
+        setProgress(12);
+        setMessage(t(lang, "Распознавание текста", "Recognizing text"));
+        setText(await callOcrFile(file));
       } else if (kind === "transcription") {
         try {
-          const outputName = replaceExtension(file.name, "speech.mp3");
-          const audioBytes = await runFfmpegJob(
-            file,
-            outputName,
-            (input, output) => ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", output],
-            (nextProgress, nextMessage) => {
-              setProgress(nextProgress);
-              setMessage(nextMessage);
-            }
-          );
-          setMessage(t(lang, "Распознавание речи", "Recognizing speech"));
-          const audioFile = new File([audioBytes], outputName, { type: "audio/mpeg" });
-          setText(await callGeminiFileTextApi(audioFile, "Transcribe this audio. Return plain text only. Keep the original language and add line breaks between meaningful phrases."));
+          setText(await transcribeWithLocalWhisper(file, (nextProgress, nextMessage) => {
+            setProgress(nextProgress);
+            setMessage(nextMessage);
+          }));
         } catch (reason) {
-          if (reason instanceof Error && /GEMINI_API_KEY|quota|model|fetch|network|memory|abort/i.test(reason.message)) throw reason;
-          setMessage(t(lang, "Запасной способ", "Fallback method"));
-          setText(await callTranscriptionApi(file));
+          const localError = reason instanceof Error ? reason.message : "";
+          try {
+            setProgress(76);
+            setMessage(t(lang, "Системное распознавание", "System recognition"));
+            setText(await callTranscriptionApi(file));
+          } catch (fallbackReason) {
+            const fallbackError = fallbackReason instanceof Error ? fallbackReason.message : t(lang, "Не удалось распознать речь.", "Speech recognition failed.");
+            throw new Error(localError ? `${localError}\n${fallbackError}` : fallbackError);
+          }
         }
       } else if (kind === "document-converter") {
-        try {
-          setText(await callDocumentTextApi(file));
-        } catch {
-          setMessage(t(lang, "Уточнение результата", "Refining result"));
-          setText(await callGeminiFileTextApi(file, "Extract the useful text from this document. Preserve structure when possible and return plain text only."));
-        }
+        setProgress(20);
+        setMessage(t(lang, "Чтение документа", "Reading document"));
+        setText(await callDocumentTextApi(file));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось получить текст.");
